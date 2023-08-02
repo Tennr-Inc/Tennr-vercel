@@ -1,67 +1,89 @@
-import { kv } from '@vercel/kv'
-import { OpenAIStream, StreamingTextResponse } from 'ai'
-import { Configuration, OpenAIApi } from 'openai-edge'
+import { StreamingTextResponse } from 'ai'
 
 import { auth } from '@/auth'
-import { nanoid } from '@/lib/utils'
-
-export const runtime = 'edge'
-
-const configuration = new Configuration({
-  apiKey: process.env.OPENAI_API_KEY
-})
-
-const openai = new OpenAIApi(configuration)
 
 export async function POST(req: Request) {
-  const json = await req.json()
-  const { messages, previewToken } = json
-  const userId = (await auth())?.user.id
+  try {
+    const json = await req.json()
+    const { messages } = json
+    const userId = (await auth())?.user.id
 
-  if (!userId) {
-    return new Response('Unauthorized', {
-      status: 401
-    })
-  }
-
-  if (previewToken) {
-    configuration.apiKey = previewToken
-  }
-
-  const res = await openai.createChatCompletion({
-    model: 'gpt-3.5-turbo',
-    messages,
-    temperature: 0.7,
-    stream: true
-  })
-
-  const stream = OpenAIStream(res, {
-    async onCompletion(completion) {
-      const title = json.messages[0].content.substring(0, 100)
-      const id = json.id ?? nanoid()
-      const createdAt = Date.now()
-      const path = `/chat/${id}`
-      const payload = {
-        id,
-        title,
-        userId,
-        createdAt,
-        path,
-        messages: [
-          ...messages,
-          {
-            content: completion,
-            role: 'assistant'
-          }
-        ]
-      }
-      await kv.hmset(`chat:${id}`, payload)
-      await kv.zadd(`user:chat:${userId}`, {
-        score: createdAt,
-        member: `chat:${id}`
+    if (!userId) {
+      return new Response('Unauthorized', {
+        status: 401
       })
     }
-  })
 
-  return new StreamingTextResponse(stream)
+    const agentId = process.env.TENNR_AGENT_ID;
+    const agentUrl = 'https://agent.tennr.com'
+    var streamIt = false
+
+    const response = await fetch(agentUrl + '/api/v1/workflow/run', {
+      method: 'POST',
+      mode: 'cors',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `api-key ${process.env.TENNR_API_KEY}`
+      },
+      body: JSON.stringify({
+        agentId: agentId,
+        input: messages[messages.length - 1].content,
+        stream: streamIt,
+        messages: messages
+      })
+    })
+
+    let responseStream
+    if (streamIt) {
+      const responseText = await response.text()
+
+      const messageArr = responseText
+        .split('\n\n')
+        .filter(message => message.startsWith('data:'))
+        .map(message => message.slice('data: '.length))
+
+      const combinedMessages = messageArr.join('')
+
+      // Removing the unwanted part
+      const cleanedMessages = combinedMessages
+        .replace(/{"sources":\[.*\]}/, '')
+        .trim()
+
+      responseStream = arrayToStream([cleanedMessages])
+    } else {
+      const responseJson = JSON.parse(await response.text())
+      const outputText = responseJson.output // Extract the output text.
+      responseStream = stringToStream(outputText)
+    }
+
+    return new StreamingTextResponse(responseStream)
+  } catch (e) {
+    console.error(e)
+  }
+}
+
+function stringToStream(response: string) {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(response))
+      controller.close()
+    }
+  })
+}
+
+function arrayToStream(array: string[]) {
+  let currentIndex = 0
+
+  return new ReadableStream({
+    pull(controller) {
+      if (currentIndex >= array.length) {
+        controller.close()
+      } else {
+        // Append a newline and enqueue the message as is, without JSON.stringify
+        const text = array[currentIndex] + '\n'
+        controller.enqueue(new TextEncoder().encode(text))
+        currentIndex++
+      }
+    }
+  })
 }
