@@ -92,8 +92,6 @@ function customLogicToStream(response: Response) {
               const statusUpdateParsed = JSON.parse(message)
               const statusUpdate = statusUpdateParsed?.statusUpdate
 
-              console.log('status update', statusUpdate)
-
               if (
                 statusUpdate &&
                 statusUpdate.output &&
