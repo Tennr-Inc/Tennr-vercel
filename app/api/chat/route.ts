@@ -16,7 +16,6 @@ export async function POST(req: Request) {
 
     const agentId = process.env.TENNR_AGENT_ID
     const agentUrl = 'https://agent.tennr.com'
-    const streamIt = true
 
     const response = await fetch(agentUrl + '/api/v1/workflow/run', {
       method: 'POST',
@@ -28,33 +27,16 @@ export async function POST(req: Request) {
       body: JSON.stringify({
         agentId: agentId,
         input: messages[messages.length - 1].content,
-        stream: streamIt,
+        stream: true,
         messages: messages
       })
     })
 
-    let responseStream
-    if (streamIt) {
-      responseStream = customLogicToStream(response)
-    } else {
-      const responseJson = JSON.parse(await response.text())
-      const outputText = responseJson.output // Extract the output text.
-      responseStream = stringToStream(outputText)
-    }
-
+    const responseStream = customLogicToStream(response)
     return new StreamingTextResponse(responseStream)
   } catch (e) {
     console.error(e)
   }
-}
-
-function stringToStream(response: string) {
-  return new ReadableStream({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode(response))
-      controller.close()
-    }
-  })
 }
 
 function customLogicToStream(response: Response) {
