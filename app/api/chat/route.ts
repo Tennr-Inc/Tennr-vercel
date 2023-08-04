@@ -14,9 +14,9 @@ export async function POST(req: Request) {
       })
     }
 
-    const agentId = process.env.TENNR_AGENT_ID;
+    const agentId = process.env.TENNR_AGENT_ID
     const agentUrl = 'https://agent.tennr.com'
-    var streamIt = false
+    const streamIt = true
 
     const response = await fetch(agentUrl + '/api/v1/workflow/run', {
       method: 'POST',
@@ -35,21 +35,7 @@ export async function POST(req: Request) {
 
     let responseStream
     if (streamIt) {
-      const responseText = await response.text()
-
-      const messageArr = responseText
-        .split('\n\n')
-        .filter(message => message.startsWith('data:'))
-        .map(message => message.slice('data: '.length))
-
-      const combinedMessages = messageArr.join('')
-
-      // Removing the unwanted part
-      const cleanedMessages = combinedMessages
-        .replace(/{"sources":\[.*\]}/, '')
-        .trim()
-
-      responseStream = arrayToStream([cleanedMessages])
+      responseStream = customLogicToStream(response)
     } else {
       const responseJson = JSON.parse(await response.text())
       const outputText = responseJson.output // Extract the output text.
@@ -71,19 +57,66 @@ function stringToStream(response: string) {
   })
 }
 
-function arrayToStream(array: string[]) {
-  let currentIndex = 0
+function customLogicToStream(response: Response) {
+  const reader = response?.body?.getReader()
+  if (!reader) throw new Error('No reader created.')
+
+  const decoder = new TextDecoder('utf-8')
+  let messageAccumulator = ''
+  let currResponseMessage = ''
 
   return new ReadableStream({
-    pull(controller) {
-      if (currentIndex >= array.length) {
-        controller.close()
-      } else {
-        // Append a newline and enqueue the message as is, without JSON.stringify
-        const text = array[currentIndex] + '\n'
-        controller.enqueue(new TextEncoder().encode(text))
-        currentIndex++
+    start(controller) {
+      const read = async () => {
+        const { done, value } = await reader.read()
+        if (done) {
+          controller.close()
+          return
+        }
+        const decodedValue = decoder.decode(value)
+        messageAccumulator += decodedValue
+
+        const messages = messageAccumulator.split('\n\n')
+        messageAccumulator = messages.pop() || ''
+
+        for (let message of messages) {
+          message = message
+            .split('\n')
+            .map(line => line.replace(/^data: /, ''))
+            .join('\n')
+
+          if (message === '[DONE]') continue
+
+          if (message.indexOf(`"statusUpdate":`) !== -1) {
+            try {
+              const statusUpdateParsed = JSON.parse(message)
+              const statusUpdate = statusUpdateParsed?.statusUpdate
+
+              console.log('status update', statusUpdate)
+
+              if (
+                statusUpdate &&
+                statusUpdate.output &&
+                statusUpdate.stepType === 'GENERATE_ANSWER'
+              ) {
+                let outputText = statusUpdate.output.replace(/<br\/>/g, '\n') // replace <br/> with newline
+                outputText = outputText.replace(/&amp;/g, '&') // replace &amp; with &
+                // add similar replacements for other HTML entities if needed
+
+                const newPart = outputText.slice(currResponseMessage.length)
+                if (newPart.length > 0) {
+                  controller.enqueue(new TextEncoder().encode(newPart))
+                }
+                currResponseMessage = outputText
+              }
+            } catch (e) {
+              console.error('Failed to parse status update.', e)
+            }
+          }
+        }
+        read()
       }
+      read()
     }
   })
 }
